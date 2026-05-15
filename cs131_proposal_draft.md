@@ -1,6 +1,6 @@
 # 3D Reconstruction of Primary Tree Branch Structure from Skyward Multi-View Smartphone Capture
 
-**Cole [Last Name]** — CS 131, Spring 2026 — Solo Project
+**Cole Van Hersett** — CS 131, Spring 2026 — Solo Project
 
 ## Problem Statement
 
