@@ -1,0 +1,36 @@
+# 3D Reconstruction of Primary Tree Branch Structure from Skyward Multi-View Smartphone Capture
+
+**Cole [Last Name]** — CS 131, Spring 2026 — Solo Project
+
+## Problem Statement
+
+Recovering the 3D structure of a tree — not just its height or trunk, but the geometry of its primary branches — is a long-standing problem in computer vision with applications to forestry, arboriculture, hazard assessment, and biomass estimation. Most existing approaches rely on LiDAR or specialized multi-camera rigs; image-only methods using consumer hardware remain limited, primarily because leaf occlusion hides branch structure from typical outside-the-tree viewpoints.
+
+This project investigates a capture strategy designed around tree-specific occlusion geometry: **skyward orbital capture from the base of the trunk**. Rather than imaging the tree from a distance, the camera moves in a small arc around the trunk while pointed upward, looking through the canopy from below. This exploits two structural facts: (1) primary branches near the trunk lie above most of the leaf mass and are largely unoccluded from below, and (2) branches silhouetted against the sky form high-contrast features favorable for both correspondence matching and segmentation. The technical contribution is a pipeline that takes such a video and outputs a **3D branch graph** rooted at the trunk base — a structured representation of primary branches, their attachment points, and their directions — together with empirical accuracy characterization across species and lighting conditions. The pipeline spans all three course units (low-level vision for segmentation and edges, geometry for multi-view reconstruction, and ML for CV for learned segmentation comparison), and the algorithmic core is a Livny-inspired minimum-spanning-tree skeleton extraction adapted to the noisy point clouds produced by image-only reconstruction of thin structures.
+
+Output is scoped to *primary* branch structure (trunk + first-order branches, proximal portions). Fine branches and twigs are explicitly out of scope and treated as characterized limitations rather than targets.
+
+## Proposed Methodology
+
+The pipeline has five stages, each drawing on specific CS 131 material:
+
+1. **Calibration and capture** (Lecture 6: Calibration). Camera intrinsics estimated once via checkerboard. Capture protocol: 15–25 second video, ~2-meter orbit radius around trunk, camera tilted ~30° above horizontal, with deliberate translation to avoid pure-rotation degeneracy.
+
+2. **Feature detection and correspondence** (Lecture 4: Local Features; Lecture 2: Filters). SIFT keypoints extracted across frames; branches against sky yield strong corner-like features at junctions and silhouette transitions. Correspondences matched with ratio test and geometrically verified via RANSAC.
+
+3. **Multi-view reconstruction** (Lectures 8–9: Multi-View Geometry I & II). Essential matrix estimation via the 8-point algorithm with RANSAC, implemented from scratch on a two-view subset to satisfy course alignment. Full multi-view reconstruction via COLMAP for pose recovery and sparse triangulation. The two-view from-scratch component serves as both a course-aligned implementation exercise and a benchmark against the full pipeline.
+
+4. **Branch segmentation — classical vs learned comparison** (Lectures 2–3: Filters and Edges; Lectures 11–13: ML for CV). Sky-vs-structure segmentation is performed two ways in parallel: (a) a classical pipeline using brightness thresholding and Canny edge detection, and (b) a learned pipeline using a pretrained segmentation model (Segment Anything) with a trunk-base point prompt. Both produce per-frame structure masks; both are evaluated as ablations in the final report. The segmentation also enables silhouette-based reasoning that complements point-cloud SfM: pixels labeled "structure" define 3D rays under the recovered camera poses, and branch geometry is reinforced where these rays intersect consistently across views — a course-aligned (Lecture 7: Single View Metrology) extension that helps recover thin structures the point cloud misses.
+
+5. **Trunk-rooted skeleton extraction via minimum spanning tree.** Adapted from Livny et al. (2010), "Automatic Reconstruction of Tree Skeletal Structures." The trunk axis is fit first via RANSAC on the dense vertical structure near the camera origin, fixing the root node. A weighted graph is built over the structure-labeled 3D points, with edges between spatial neighbors weighted by Euclidean distance. The MST rooted at the trunk base produces a tree-graph through the point cloud. Pruning removes short spurious branches; collinear segments are merged via piecewise line fitting (Lecture 3: Lines / Hough Transform extends naturally to 3D RANSAC line fitting). The final output is a directed branch graph: trunk as root, each primary branch as a child node characterized by attachment point, attachment angle, direction vector, and proximal length.
+
+**Evaluation.** Dataset: 8–12 trees on Stanford campus, prioritizing species with clear primary branching (oaks, sycamores, maples). Ground truth on a subset via tape measure (trunk diameter, attachment heights) and protractor (attachment angles). Quantitative metrics: primary branch count recall, attachment angle error (mean absolute), attachment height error. Built-in ablations: classical vs learned segmentation; two-view vs multi-view reconstruction; with vs without silhouette-based reinforcement. Qualitative analysis: failure modes by species, lighting condition, and leaf density.
+
+## Feasibility and Timeline
+
+- **Week 1 (5/16–5/22):** Calibration; capture protocol pilot on 2–3 trees; SIFT correspondence; two-view essential matrix and triangulation implemented from scratch. *Milestone deliverable: sparse 3D point cloud of one tree with visible primary branch structure, plus working two-view reconstruction on a benchmark pair.*
+- **Week 2 (5/23–5/29):** Classical and SAM-based segmentation pipelines; full COLMAP integration; trunk axis extraction; initial MST-based skeleton implementation; expand dataset to 8+ trees.
+- **Week 3 (5/30–6/2):** Branch graph pruning and segment merging; silhouette-based reinforcement; ground truth collection; quantitative evaluation; demo day slides (due 6/2).
+- **Week 4 (6/3–6/6):** Ablations across segmentation methods, view counts, and reinforcement; failure mode analysis across species and lighting; final report.
+
+**Primary risks and mitigations.** (1) *Rotational degeneracy in SfM:* enforced via capture protocol with explicit translation; verified per-capture by checking recovered baseline length against a minimum threshold. (2) *Thin-structure reconstruction failure:* skyward capture, sky-segmentation prior, and silhouette-based reinforcement specifically address this; remaining failures are characterized as limitations rather than treated as project blockers. (3) *Leaf density variation in May:* species selection biased toward early-leafing trees with sparse canopies; leaf density itself becomes an experimental variable to characterize, turning a constraint into a deliverable. (4) *MST hyperparameter sensitivity (edge-distance threshold, pruning length):* tuned on a held-out subset of the dataset; sensitivity reported in the final analysis.
