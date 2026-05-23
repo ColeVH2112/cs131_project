@@ -35,3 +35,4 @@ colmap_workspace/
 sparse/
 dense/
 database.db
+.claude/
