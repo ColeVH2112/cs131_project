@@ -1,0 +1,33 @@
+# CS 131 final project — 3D tree reconstruction from skyward smartphone capture
+# Tested with Python 3.10+
+
+# Core numerics / I/O
+numpy>=1.24
+scipy>=1.10
+matplotlib>=3.7
+
+# Computer vision
+opencv-python>=4.8
+opencv-contrib-python>=4.8   # SIFT lives in contrib
+
+# Point cloud + geometry
+open3d>=0.17
+
+# Segment Anything (SAM)
+# Install torch separately for your platform from https://pytorch.org
+torch>=2.0
+torchvision>=0.15
+segment-anything @ git+https://github.com/facebookresearch/segment-anything.git
+
+# Notebook tooling
+jupyter
+ipykernel
+ipywidgets
+tqdm
+
+# Plotting / image utilities
+pillow>=10.0
+scikit-image>=0.21
+
+# Graph algorithms (Dijkstra reference; from-scratch implementation lives in src/branch_graph.py)
+networkx>=3.0
