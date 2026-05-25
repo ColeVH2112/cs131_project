@@ -118,10 +118,9 @@ Two artifacts, both produced by notebooks above:
 
 ## What's implemented from scratch vs. library-wrapped
 
-Per CS 131 convention, from-scratch code lives between `### YOUR CODE HERE` /
+Per CS 131 convention: `### YOUR CODE HERE` /
 `### END YOUR CODE` markers.
 
-**From scratch** (graders will inspect these):
 - `src/two_view.py` — normalized 8-point, E-matrix decomposition, DLT triangulation, cheirality.
 - `src/segmentation.py::classical_sky_mask` — brightness threshold + Canny edges.
 - `src/filter_cloud.py` — reprojection-based cloud filtering (core novelty).
