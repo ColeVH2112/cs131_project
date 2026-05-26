@@ -73,7 +73,20 @@ def normalize_points(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         T is the 3x3 normalisation matrix that produced them.
     """
     ### YOUR CODE HERE
-    raise NotImplementedError("normalize_points: from-scratch implementation pending.")
+    pts = np.asarray(points, dtype=np.float64)
+    centroid = pts.mean(axis=0)
+    centered = pts - centroid
+    mean_dist = float(np.mean(np.linalg.norm(centered, axis=1)))
+    # Guard against the degenerate case where all points coincide.
+    scale = np.sqrt(2.0) / mean_dist if mean_dist > 1e-12 else 1.0
+    T = np.array([
+        [scale, 0.0,   -scale * centroid[0]],
+        [0.0,   scale, -scale * centroid[1]],
+        [0.0,   0.0,    1.0],
+    ])
+    pts_h = np.hstack([pts, np.ones((len(pts), 1))])
+    pts_norm_h = (T @ pts_h.T).T
+    return pts_norm_h, T
     ### END YOUR CODE
 
 
@@ -106,7 +119,34 @@ def eight_point_algorithm(pts1: np.ndarray, pts2: np.ndarray) -> np.ndarray:
         raise ValueError("pts1 and pts2 must have the same length.")
 
     ### YOUR CODE HERE
-    raise NotImplementedError("eight_point_algorithm: from-scratch implementation pending.")
+    pts1 = np.asarray(pts1, dtype=np.float64)
+    pts2 = np.asarray(pts2, dtype=np.float64)
+
+    pts1_n, T1 = normalize_points(pts1)
+    pts2_n, T2 = normalize_points(pts2)
+
+    x1, y1 = pts1_n[:, 0], pts1_n[:, 1]
+    x2, y2 = pts2_n[:, 0], pts2_n[:, 1]
+    ones = np.ones_like(x1)
+
+    # Each row encodes x2ᵀ F x1 = 0 with f stacked column-major as in HZ §11.1.
+    A = np.column_stack([
+        x2 * x1, x2 * y1, x2,
+        y2 * x1, y2 * y1, y2,
+        x1,      y1,      ones,
+    ])
+
+    _, _, Vt = np.linalg.svd(A)
+    F_norm = Vt[-1].reshape(3, 3)
+
+    # Enforce det(F) = 0 by zeroing the smallest singular value.
+    U_f, S_f, Vt_f = np.linalg.svd(F_norm)
+    S_f[-1] = 0.0
+    F_norm = U_f @ np.diag(S_f) @ Vt_f
+
+    # Denormalise: F = T2ᵀ F_norm T1.
+    F = T2.T @ F_norm @ T1
+    return F
     ### END YOUR CODE
 
 
@@ -129,7 +169,12 @@ def fundamental_to_essential(F: np.ndarray, K1: np.ndarray, K2: np.ndarray) -> n
         3x3 essential matrix E with rank 2 and equal non-zero singular values.
     """
     ### YOUR CODE HERE
-    raise NotImplementedError("fundamental_to_essential: from-scratch implementation pending.")
+    E = K2.T @ F @ K1
+    U, S, Vt = np.linalg.svd(E)
+    # Re-project to the essential manifold: equal non-zero singular values, zero third.
+    s = (S[0] + S[1]) / 2.0
+    E = U @ np.diag([s, s, 0.0]) @ Vt
+    return E
     ### END YOUR CODE
 
 
@@ -150,7 +195,29 @@ def decompose_essential(E: np.ndarray) -> list[tuple[np.ndarray, np.ndarray]]:
         unrecoverable from two views without external metric information).
     """
     ### YOUR CODE HERE
-    raise NotImplementedError("decompose_essential: from-scratch implementation pending.")
+    U, _, Vt = np.linalg.svd(E)
+    W = np.array([
+        [0.0, -1.0, 0.0],
+        [1.0,  0.0, 0.0],
+        [0.0,  0.0, 1.0],
+    ])
+
+    R_a = U @ W   @ Vt
+    R_b = U @ W.T @ Vt
+    # Each candidate must be a proper rotation (det = +1). If SVD gave us
+    # a reflection, negate the whole matrix (still satisfies E = [t]_x R).
+    if np.linalg.det(R_a) < 0:
+        R_a = -R_a
+    if np.linalg.det(R_b) < 0:
+        R_b = -R_b
+
+    t = U[:, 2]
+    return [
+        (R_a,  t.copy()),
+        (R_a, -t.copy()),
+        (R_b,  t.copy()),
+        (R_b, -t.copy()),
+    ]
     ### END YOUR CODE
 
 
@@ -182,7 +249,27 @@ def triangulate_dlt(
         raise ValueError("pts1 and pts2 must have the same length.")
 
     ### YOUR CODE HERE
-    raise NotImplementedError("triangulate_dlt: from-scratch implementation pending.")
+    pts1 = np.asarray(pts1, dtype=np.float64)
+    pts2 = np.asarray(pts2, dtype=np.float64)
+    N = len(pts1)
+    X = np.zeros((N, 3), dtype=np.float64)
+
+    for i in range(N):
+        x1, y1 = pts1[i]
+        x2, y2 = pts2[i]
+        # Two independent rows from each camera's cross product x × (P X) = 0.
+        A = np.vstack([
+            x1 * P1[2] - P1[0],
+            y1 * P1[2] - P1[1],
+            x2 * P2[2] - P2[0],
+            y2 * P2[2] - P2[1],
+        ])
+        _, _, Vt = np.linalg.svd(A)
+        X_h = Vt[-1]
+        w = X_h[3] if abs(X_h[3]) > 1e-12 else 1e-12
+        X[i] = X_h[:3] / w
+
+    return X
     ### END YOUR CODE
 
 
@@ -222,7 +309,31 @@ def cheirality_check(
             mask:        (N,) bool of cheirality-positive points
     """
     ### YOUR CODE HERE
-    raise NotImplementedError("cheirality_check: from-scratch implementation pending.")
+    P1 = K @ np.hstack([np.eye(3), np.zeros((3, 1))])
+
+    best_count = -1
+    best_R = best_t = best_X = best_mask = None
+
+    for R, t in candidates:
+        t_col = t.reshape(3, 1)
+        P2 = K @ np.hstack([R, t_col])
+        X = triangulate_dlt(P1, P2, pts1, pts2)
+
+        depth1 = X[:, 2]
+        X_cam2 = (R @ X.T + t_col).T
+        depth2 = X_cam2[:, 2]
+
+        mask = (depth1 > 0) & (depth2 > 0)
+        count = int(mask.sum())
+
+        if count > best_count:
+            best_count = count
+            best_R = R
+            best_t = t.ravel().copy()
+            best_X = X
+            best_mask = mask
+
+    return best_R, best_t, best_X, best_mask
     ### END YOUR CODE
 
 
@@ -255,7 +366,11 @@ def two_view_reconstruction(
         TwoViewResult bundle.
     """
     ### YOUR CODE HERE
-    raise NotImplementedError("two_view_reconstruction: from-scratch implementation pending.")
+    F = eight_point_algorithm(pts1, pts2)
+    E = fundamental_to_essential(F, K, K)
+    candidates = decompose_essential(E)
+    R, t, X, mask = cheirality_check(candidates, pts1, pts2, K)
+    return TwoViewResult(R=R, t=t, points_3d=X, inlier_mask=mask, E=E, F=F)
     ### END YOUR CODE
 
 
