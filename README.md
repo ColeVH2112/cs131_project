@@ -6,6 +6,13 @@ The system takes a short skyward smartphone orbit around a tree's base and outpu
 3D branch graph: trunk axis plus first-order branches with their attachment points,
 angles, and growth directions.
 
+> **Milestone (5/22) status:** both milestone artifacts are in place. See
+> `notebooks/03_two_view_scratch.ipynb` for the from-scratch two-view reconstruction vs.
+> OpenCV reference, and `notebooks/04_sfm_colmap.ipynb` for the COLMAP sparse cloud of a
+> sample tree. Figures land in `outputs/figures/`. Week 3–4 work (segmentation, reprojection
+> filter, trunk/branch graph extraction, evaluation against ground truth) is still scaffolded
+> per the original timeline.
+
 ## Pipeline
 
 ```
@@ -133,3 +140,19 @@ Per CS 131 convention: `### YOUR CODE HERE` /
 - `src/sfm.py` — COLMAP CLI wrapper.
 - `src/segmentation.py::sam_sky_mask` — SAM predictor wrapper.
 - `src/evaluate.py`, `src/viz.py` — metrics + plotting helpers.
+
+## AI assistance disclosure
+
+Scaffolding code — module layout, library wrappers (the COLMAP CLI interface, the COLMAP
+binary-format readers, the `.ply` writer, plotting helpers), notebook narrative
+skeletons, and the docstring-driven function signatures for the from-scratch modules —
+was produced with AI assistance. All from-scratch algorithmic implementations marked
+with `### YOUR CODE HERE` / `### END YOUR CODE` blocks are intended to be written by
+hand: the two-view geometric pipeline (`src/two_view.py`, complete), classical
+segmentation, reprojection-based cloud filtering, RANSAC trunk fitting, and the
+Dijkstra branch graph extraction (these four remain stubbed at the milestone and are
+the Week 3–4 work).
+
+The CLAHE + bark-color preprocessing cells added to `notebooks/02` and `notebooks/04`
+to make COLMAP reconstruct the trunk rather than the background were developed
+interactively with AI assistance as well; they live inside the notebooks, not in `src/`.
