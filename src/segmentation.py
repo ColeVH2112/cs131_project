@@ -61,7 +61,38 @@ def classical_sky_mask(
         (H, W) boolean mask. True = structure, False = sky.
     """
     ### YOUR CODE HERE
-    raise NotImplementedError("classical_sky_mask: from-scratch implementation pending.")
+    # Grayscale: brightness is the cheap proxy for "is this pixel sky-bright".
+    gray = (
+        cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+        if image_bgr.ndim == 3 else image_bgr
+    )
+
+    # Stage 1: brightness threshold. Pixels brighter than this are sky candidates.
+    bright = gray > brightness_thresh
+
+    # Stage 2: Canny edges. Branch silhouettes against the sky produce strong
+    # local gradients; the sky interior does not. We dilate the edge map so
+    # "near an edge" is a small neighbourhood, not just the exact edge pixels —
+    # this lets us label trunk-edge pixels (which are bright at the boundary
+    # but adjacent to a strong silhouette gradient) as structure rather than sky.
+    edges = cv2.Canny(gray, canny_low, canny_high)
+    near_edge = cv2.dilate(
+        edges,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)),
+    ) > 0
+
+    # Sky = bright AND not near any edge. Structure is its complement.
+    sky = bright & ~near_edge
+    structure = ~sky
+
+    # Stage 3: morphological closing fills small interior holes inside branches
+    # — places where a bright sky-coloured pixel survived the brightness gate
+    # because it didn't happen to be near a detected Canny edge.
+    close = cv2.getStructuringElement(cv2.MORPH_RECT, (morph_kernel, morph_kernel))
+    structure_u8 = cv2.morphologyEx(
+        structure.astype(np.uint8), cv2.MORPH_CLOSE, close,
+    )
+    return structure_u8.astype(bool)
     ### END YOUR CODE
 
 
