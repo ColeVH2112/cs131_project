@@ -113,7 +113,46 @@ def filter_cloud_by_masks(
         raise ValueError("Need at least one frame to filter.")
 
     ### YOUR CODE HERE
-    raise NotImplementedError("filter_cloud_by_masks: from-scratch implementation pending.")
+    points_3d = np.asarray(points_3d, dtype=np.float64)
+    N = len(points_3d)
+    F = len(projections)
+
+    visible_count = np.zeros(N, dtype=np.int32)
+    hit_count     = np.zeros(N, dtype=np.int32)
+
+    for P, mask in zip(projections, masks):
+        H, W = mask.shape
+        uv, depth = project_points(P, points_3d)
+        u = uv[:, 0]
+        v = uv[:, 1]
+
+        in_bounds = (
+            (depth > 0.0) &
+            (u >= 0.0) & (u < W) &
+            (v >= 0.0) & (v < H)
+        )
+        visible_count[in_bounds] += 1
+
+        if not np.any(in_bounds):
+            continue
+
+        # Nearest-pixel lookup. Round, clip to be safe against numerical edge
+        # cases, then read mask values; only count as hits where in_bounds.
+        u_int = np.clip(np.round(u).astype(np.int64), 0, W - 1)
+        v_int = np.clip(np.round(v).astype(np.int64), 0, H - 1)
+        landed_on_structure = mask[v_int, u_int]
+        hit_count += (landed_on_structure & in_bounds).astype(np.int32)
+
+    safe_visible = np.maximum(visible_count, 1).astype(np.float32)
+    hit_rate = hit_count.astype(np.float32) / safe_visible
+    kept_mask = (hit_rate >= hit_rate_threshold) & (visible_count >= min_visible_frames)
+
+    diag = FilterDiagnostics(
+        visible_count=visible_count,
+        hit_count=hit_count,
+        hit_rate=hit_rate,
+    )
+    return points_3d[kept_mask], kept_mask, diag
     ### END YOUR CODE
 
 
@@ -142,7 +181,33 @@ def remove_statistical_outliers(
         (kept_points, kept_mask) — kept_mask is (N,) bool.
     """
     ### YOUR CODE HERE
-    raise NotImplementedError("remove_statistical_outliers: from-scratch implementation pending.")
+    points_3d = np.asarray(points_3d, dtype=np.float64)
+    N = len(points_3d)
+    if N <= k + 1:
+        # Not enough points for a meaningful neighbourhood — keep all.
+        return points_3d.copy(), np.ones(N, dtype=bool)
+
+    # Mean distance to k nearest neighbours, per point.
+    # O(N^2) pairwise — fine for sparse SfM clouds (~10k points). For larger
+    # clouds, swap this for a KD-tree, but kept hand-rolled here for the
+    # from-scratch credit per the project brief.
+    mean_dist = np.empty(N, dtype=np.float64)
+    for i in range(N):
+        diff = points_3d - points_3d[i]
+        d = np.linalg.norm(diff, axis=1)
+        # Partition to find the k+1 smallest (includes self at distance 0),
+        # then average the k non-self entries.
+        nearest = np.partition(d, k + 1)[: k + 1]
+        nearest = nearest[nearest > 0.0]   # drop the self-distance
+        if len(nearest) < k:
+            mean_dist[i] = nearest.mean() if len(nearest) > 0 else 0.0
+        else:
+            mean_dist[i] = nearest[:k].mean()
+
+    mu = float(mean_dist.mean())
+    sigma = float(mean_dist.std())
+    keep_mask = mean_dist < (mu + std_ratio * sigma)
+    return points_3d[keep_mask], keep_mask
     ### END YOUR CODE
 
 
@@ -157,5 +222,23 @@ def voxel_downsample(points_3d: np.ndarray, voxel_size: float) -> np.ndarray:
         (M, 3) downsampled cloud where M ≤ N.
     """
     ### YOUR CODE HERE
-    raise NotImplementedError("voxel_downsample: from-scratch implementation pending.")
+    points_3d = np.asarray(points_3d, dtype=np.float64)
+    if len(points_3d) == 0:
+        return points_3d.copy()
+    if voxel_size <= 0:
+        raise ValueError(f"voxel_size must be positive, got {voxel_size}")
+
+    # Integer-quantise each point to a voxel coordinate, then average the
+    # points that fell into each occupied voxel. np.unique with
+    # return_inverse gives the per-point voxel index; np.add.at performs the
+    # scatter-add for centroid accumulation.
+    voxel_idx = np.floor(points_3d / voxel_size).astype(np.int64)
+    _, inverse = np.unique(voxel_idx, axis=0, return_inverse=True)
+    M = int(inverse.max()) + 1
+
+    sums   = np.zeros((M, 3), dtype=np.float64)
+    counts = np.zeros(M,       dtype=np.int64)
+    np.add.at(sums,   inverse, points_3d)
+    np.add.at(counts, inverse, 1)
+    return sums / counts[:, None]
     ### END YOUR CODE

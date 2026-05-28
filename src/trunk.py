@@ -55,7 +55,14 @@ def point_to_line_distance(
         (N,) per-point perpendicular distance.
     """
     ### YOUR CODE HERE
-    raise NotImplementedError("point_to_line_distance: from-scratch implementation pending.")
+    points = np.asarray(points, dtype=np.float64)
+    d = np.asarray(direction, dtype=np.float64)
+    d = d / (np.linalg.norm(d) + 1e-12)
+    v = points - np.asarray(anchor, dtype=np.float64)[None, :]
+    # Projection of v onto d, then subtract to get the perpendicular component.
+    proj = (v @ d)[:, None] * d[None, :]
+    perp = v - proj
+    return np.linalg.norm(perp, axis=1)
     ### END YOUR CODE
 
 
@@ -75,7 +82,15 @@ def fit_line_pca(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
             direction: (3,) unit vector of the principal axis.
     """
     ### YOUR CODE HERE
-    raise NotImplementedError("fit_line_pca: from-scratch implementation pending.")
+    points = np.asarray(points, dtype=np.float64)
+    centroid = points.mean(axis=0)
+    centered = points - centroid
+    # SVD on the centred matrix; rows of Vt are principal directions, sorted
+    # by descending singular value. The first row is the line's axis.
+    _, _, Vt = np.linalg.svd(centered, full_matrices=False)
+    direction = Vt[0]
+    direction = direction / (np.linalg.norm(direction) + 1e-12)
+    return centroid, direction
     ### END YOUR CODE
 
 
@@ -131,7 +146,67 @@ def ransac_trunk_axis(
         rng = np.random.default_rng(131)
 
     ### YOUR CODE HERE
-    raise NotImplementedError("ransac_trunk_axis: from-scratch implementation pending.")
+    points = np.asarray(points, dtype=np.float64)
+    N = len(points)
+
+    up_axis = np.zeros(3, dtype=np.float64)
+    up_axis[vertical_axis] = 1.0
+
+    best_inlier_count = -1
+    best_inlier_mask = None
+
+    for _ in range(num_iter):
+        # Sample two distinct points → candidate line.
+        idx = rng.choice(N, size=2, replace=False)
+        p1, p2 = points[idx[0]], points[idx[1]]
+        d_vec = p2 - p1
+        d_norm = np.linalg.norm(d_vec)
+        if d_norm < 1e-9:
+            continue
+        d_unit = d_vec / d_norm
+
+        # Tree-specific tweak: skip candidates that don't roughly point up.
+        if vertical_prior and abs(float(d_unit @ up_axis)) < vertical_cos_min:
+            continue
+
+        dists = point_to_line_distance(points, p1, d_unit)
+        inliers = dists < inlier_thresh
+        count = int(inliers.sum())
+        if count > best_inlier_count:
+            best_inlier_count = count
+            best_inlier_mask = inliers
+
+    if best_inlier_mask is None or best_inlier_count < 2:
+        raise RuntimeError(
+            "RANSAC trunk fit found no usable hypothesis. Try lowering "
+            "vertical_cos_min, raising inlier_thresh, or running more iterations."
+        )
+
+    # Refit the line with PCA over the inlier set for a tighter estimate.
+    anchor, direction = fit_line_pca(points[best_inlier_mask])
+
+    # Re-pick the inlier set under the refined line, since PCA may have
+    # moved the axis enough that a couple of marginal points cross the
+    # threshold either way.
+    final_dists = point_to_line_distance(points, anchor, direction)
+    inlier_mask = final_dists < inlier_thresh
+
+    # Root = inlier with the smallest signed projection on `direction`
+    # (i.e. the trunk base, the negative end of the axis).
+    inlier_pts = points[inlier_mask]
+    projs = (inlier_pts - anchor) @ direction
+    root = inlier_pts[int(np.argmin(projs))]
+
+    inlier_distance_mean = (
+        float(final_dists[inlier_mask].mean()) if inlier_mask.any() else 0.0
+    )
+
+    return TrunkFit(
+        root=root,
+        direction=direction,
+        inlier_mask=inlier_mask,
+        inlier_distance_mean=inlier_distance_mean,
+    )
     ### END YOUR CODE
 
 

@@ -71,7 +71,40 @@ def build_knn_graph(
         Euclidean-distance weights.
     """
     ### YOUR CODE HERE
-    raise NotImplementedError("build_knn_graph: from-scratch implementation pending.")
+    points = np.asarray(points, dtype=np.float64)
+    N = len(points)
+    if N < 2:
+        return {i: [] for i in range(N)}
+
+    k_eff = min(k, N - 1)
+
+    # Pairwise Euclidean distances. O(N^2) is fine for sparse SfM clouds
+    # (typically a few thousand points after filtering). Hand-rolled here
+    # rather than scipy.cKDTree to stay inside the from-scratch boundary.
+    diff = points[:, None, :] - points[None, :, :]    # (N, N, 3)
+    dists = np.linalg.norm(diff, axis=2)               # (N, N)
+    np.fill_diagonal(dists, np.inf)                    # exclude self-edges
+
+    graph: dict[int, list[tuple[int, float]]] = {i: [] for i in range(N)}
+
+    # Forward k-NN edges.
+    for i in range(N):
+        nearest = np.argpartition(dists[i], k_eff)[:k_eff]
+        for j in nearest:
+            d = float(dists[i, int(j)])
+            if max_edge_length is not None and d > max_edge_length:
+                continue
+            graph[i].append((int(j), d))
+
+    # Symmetrise: if i picked j, ensure j has i. Avoid duplicate edges.
+    existing = {(i, j) for i in graph for j, _ in graph[i]}
+    for i in list(graph.keys()):
+        for j, d in list(graph[i]):
+            if (j, i) not in existing:
+                graph[j].append((i, d))
+                existing.add((j, i))
+
+    return graph
     ### END YOUR CODE
 
 
@@ -101,7 +134,31 @@ def dijkstra_shortest_path_tree(
             parent_of: dict child_idx → parent_idx (root not present).
     """
     ### YOUR CODE HERE
-    raise NotImplementedError("dijkstra_shortest_path_tree: from-scratch implementation pending.")
+    import heapq
+
+    distances = np.full(n_nodes, np.inf, dtype=np.float64)
+    distances[root] = 0.0
+    parent_of: dict[int, int] = {}
+    visited = np.zeros(n_nodes, dtype=bool)
+
+    # (distance, node) min-heap.
+    heap: list[tuple[float, int]] = [(0.0, root)]
+
+    while heap:
+        d, u = heapq.heappop(heap)
+        if visited[u]:
+            continue
+        visited[u] = True
+        if d > distances[u]:
+            continue
+        for v, w in graph.get(u, []):
+            new_d = d + w
+            if new_d < distances[v]:
+                distances[v] = new_d
+                parent_of[v] = u
+                heapq.heappush(heap, (new_d, v))
+
+    return distances, parent_of
     ### END YOUR CODE
 
 
@@ -130,7 +187,52 @@ def prune_spurs(
         New parent_of dict with the spurs removed.
     """
     ### YOUR CODE HERE
-    raise NotImplementedError("prune_spurs: from-scratch implementation pending.")
+    parent_of = dict(parent_of)   # don't mutate the caller's dict
+    nodes = np.asarray(nodes, dtype=np.float64)
+
+    # Iterate until no spur is short enough to remove. Each pass:
+    # 1. Find leaves (nodes that are no one's parent).
+    # 2. For each leaf, walk up summing edge lengths until either the root
+    #    is reached or a branching node (a parent with multiple children)
+    #    is reached. If total length < min_length, delete every node along
+    #    that walk from the parent map.
+    while True:
+        # Children-of map for the current state.
+        children_of: dict[int, list[int]] = {}
+        for c, p in parent_of.items():
+            children_of.setdefault(p, []).append(c)
+
+        all_children = set(parent_of.keys())
+        all_parents = set(parent_of.values())
+        leaves = all_children - all_parents
+
+        removed_any = False
+        for leaf in list(leaves):
+            if leaf not in parent_of:
+                continue
+            walk = []
+            total_len = 0.0
+            current = leaf
+            while current in parent_of:
+                parent = parent_of[current]
+                seg = float(np.linalg.norm(nodes[current] - nodes[parent]))
+                total_len += seg
+                walk.append(current)
+                # Stop at a branching ancestor — don't delete the branching
+                # node itself, only the spur dangling off it.
+                if len(children_of.get(parent, [])) > 1:
+                    break
+                current = parent
+
+            if total_len < min_length:
+                for n in walk:
+                    parent_of.pop(n, None)
+                removed_any = True
+
+        if not removed_any:
+            break
+
+    return parent_of
     ### END YOUR CODE
 
 
@@ -167,7 +269,54 @@ def merge_collinear_segments(
         the original `nodes` and new_parent_of indexes into kept_nodes.
     """
     ### YOUR CODE HERE
-    raise NotImplementedError("merge_collinear_segments: from-scratch implementation pending.")
+    parent_of = dict(parent_of)
+    nodes = np.asarray(nodes, dtype=np.float64)
+    cos_tol = float(np.cos(np.deg2rad(angle_tolerance_deg)))
+
+    # Iteratively bypass any node that has exactly one child AND whose
+    # incoming/outgoing edge directions agree within angle_tolerance_deg.
+    while True:
+        children_of: dict[int, list[int]] = {}
+        for c, p in parent_of.items():
+            children_of.setdefault(p, []).append(c)
+
+        bypassed_any = False
+        for node, kids in list(children_of.items()):
+            if node not in parent_of:
+                continue   # root — has no parent edge to merge across
+            if len(kids) != 1:
+                continue   # branching or leaf node — preserve
+            child = kids[0]
+            parent = parent_of[node]
+
+            in_dir  = nodes[node]  - nodes[parent]
+            out_dir = nodes[child] - nodes[node]
+            in_n  = float(np.linalg.norm(in_dir))
+            out_n = float(np.linalg.norm(out_dir))
+            if in_n < 1e-9 or out_n < 1e-9:
+                continue
+
+            cos_angle = float((in_dir / in_n) @ (out_dir / out_n))
+            if cos_angle >= cos_tol:
+                # Bypass `node`: re-parent the child onto node's parent.
+                parent_of[child] = parent
+                parent_of.pop(node, None)
+                bypassed_any = True
+
+        if not bypassed_any:
+            break
+
+    # Compact the node set: only nodes that still appear as a key or as a
+    # value in parent_of are kept. Reindex contiguously starting at 0.
+    used = set(parent_of.keys()) | set(parent_of.values())
+    if not used:
+        return np.empty((0, 3), dtype=np.float64), {}
+    used_sorted = sorted(used)
+    old_to_new = {old: new for new, old in enumerate(used_sorted)}
+
+    kept_nodes = nodes[used_sorted]
+    new_parent_of = {old_to_new[c]: old_to_new[p] for c, p in parent_of.items()}
+    return kept_nodes, new_parent_of
     ### END YOUR CODE
 
 
