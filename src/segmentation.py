@@ -196,3 +196,144 @@ def mask_iou(a: np.ndarray, b: np.ndarray) -> float:
     if union == 0:
         return 1.0
     return float(np.count_nonzero(a & b)) / float(union)
+
+
+# ---------------------------------------------------------------------------
+# Bark-color mask in LAB chrominance space with Mahalanobis gating and a
+# vertical spatial prior — designed for skyward orbital captures where the
+# trunk reliably sits near the frame's horizontal midpoint.
+#
+# This is an upgrade over a raw HSV-hue threshold for three reasons:
+#   1. LAB's a*/b* are chrominance only — luminance (sun vs shadow) doesn't
+#      shift them the way it shifts HSV's V channel, so the same bark
+#      passes the gate under varied lighting around the orbit.
+#   2. Mahalanobis distance defines an oriented ellipse over the sampled
+#      bark distribution, capturing the natural correlation between a* and
+#      b* (bark is reddish-yellow, so samples cluster along a diagonal
+#      rather than an axis-aligned box).
+#   3. The vertical spatial prior suppresses bark-colored pixels at the
+#      frame periphery (background trees, brown buildings) — a free lever
+#      for this specific capture geometry.
+# ---------------------------------------------------------------------------
+
+def bark_color_mask_lab(
+    image_bgr: np.ndarray,
+    sample_grid: tuple = (
+        (0.3, 0.85), (0.5, 0.85), (0.7, 0.85),
+        (0.3, 0.60), (0.5, 0.60), (0.7, 0.60),
+        (0.4, 0.35), (0.6, 0.35),
+    ),
+    sample_half: int = 20,
+    mahalanobis_max: float = 3.0,
+    spatial_sigma_frac: float = 0.25,
+    feather_px: int = 21,
+    bark_a_min: int = 130,
+    bark_b_min: int = 130,
+    morph_kernel: int = 7,
+    dilate_kernel: int = 9,
+) -> np.ndarray:
+    """Per-frame bark mask in LAB chrominance with a vertical spatial prior.
+
+    Args:
+        image_bgr: (H, W, 3) BGR frame.
+        sample_grid: list of (x_frac, y_frac) sample-patch centres, in [0, 1].
+            8 default positions cover plausible trunk locations across the
+            orbit. Each patch is sample_half pixels around its centre.
+        sample_half: half-side of each sample patch (default: 20 → 40x40 patches).
+        mahalanobis_max: max Mahalanobis distance (in sigmas) for a pixel's
+            (a*, b*) to count as bark. 3.0 → keep ~99.7% of the bark
+            distribution if it's roughly Gaussian.
+        spatial_sigma_frac: width of the central vertical Gaussian band as a
+            fraction of image width. Pixels at |x - w/2| > 2 * sigma get
+            heavily suppressed. 0.25 → sigma = w/4 (typical trunk extent).
+        feather_px: Gaussian-blur kernel for the final mask edge. Set to 0
+            to skip feathering (e.g. when saving as a hard binary for
+            COLMAP's --ImageReader.mask_path).
+        bark_a_min, bark_b_min: only grid samples whose median (a*, b*) is
+            beyond these thresholds (128 = neutral in cv2 LAB; >128 = red
+            for a, >128 = yellow for b) are used as bark exemplars. Grid
+            points that landed on sky/grass/concrete are discarded.
+        morph_kernel: kernel size for the open/close passes that remove
+            speckle.
+        dilate_kernel: kernel size for the final dilation that bridges
+            small gaps in the mask.
+
+    Returns:
+        (H, W) float mask in [0, 1]. ~1.0 = bark, ~0.0 = not bark or far
+        from the central column. Threshold to bool with `mask > 0.5` for
+        passing to COLMAP or as a SIFT mask.
+    """
+    h, w = image_bgr.shape[:2]
+    img_lab = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2LAB)
+    ab = img_lab[:, :, 1:3].astype(np.float32)   # (H, W, 2)
+
+    # Collect (a*, b*) samples from grid points that look bark-like.
+    bark_pixels = []
+    for sx, sy in sample_grid:
+        cx, cy = int(w * sx), int(h * sy)
+        s = sample_half
+        patch = img_lab[max(0, cy-s):cy+s, max(0, cx-s):cx+s, 1:3]
+        if patch.size == 0:
+            continue
+        a_med = float(np.median(patch[:, :, 0]))
+        b_med = float(np.median(patch[:, :, 1]))
+        # Reject samples that aren't plausibly bark (sky, grass, concrete).
+        if a_med < bark_a_min or b_med < bark_b_min:
+            continue
+        bark_pixels.append(patch.reshape(-1, 2).astype(np.float32))
+
+    if not bark_pixels:
+        # Fallback: broad red-yellow gate.
+        a_chan = ab[:, :, 0]
+        b_chan = ab[:, :, 1]
+        binary = ((a_chan > bark_a_min) & (b_chan > bark_b_min)).astype(np.uint8) * 255
+    else:
+        samples = np.vstack(bark_pixels)
+        mean = samples.mean(axis=0)
+        cov = np.cov(samples.T) + np.eye(2) * 1.0    # regularize against degenerate samples
+        cov_inv = np.linalg.inv(cov)
+        diff = ab - mean[None, None, :]                          # (H, W, 2)
+        m2 = np.einsum("hwi,ij,hwj->hw", diff, cov_inv, diff)    # Mahalanobis^2
+        binary = (m2 < mahalanobis_max ** 2).astype(np.uint8) * 255
+
+    # Morphological cleanup.
+    k = cv2.getStructuringElement(cv2.MORPH_RECT, (morph_kernel, morph_kernel))
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN,  k)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, k)
+    binary = cv2.dilate(
+        binary,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (dilate_kernel, dilate_kernel)),
+    )
+
+    mask_float = binary.astype(np.float32) / 255.0
+
+    # Vertical spatial prior — Gaussian band centred on x = w/2.
+    if spatial_sigma_frac > 0:
+        sigma_x = max(1.0, w * spatial_sigma_frac)
+        xs = np.arange(w, dtype=np.float32)
+        prior = np.exp(-((xs - w / 2.0) ** 2) / (2.0 * sigma_x ** 2))   # (W,)
+        mask_float = mask_float * prior[None, :]
+
+    if feather_px > 0:
+        # Kernel size must be odd.
+        k_feather = feather_px if feather_px % 2 == 1 else feather_px + 1
+        mask_float = cv2.GaussianBlur(mask_float, (k_feather, k_feather), 0)
+
+    return mask_float
+
+
+def save_binary_mask_for_colmap(
+    mask_float: np.ndarray,
+    out_path: str | Path,
+    threshold: float = 0.5,
+) -> None:
+    """Save a float mask in [0, 1] as a binary 0/255 PNG for COLMAP.
+
+    COLMAP's `--ImageReader.mask_path` expects PNG masks with the same
+    basename as the corresponding image (extension swapped to .png). White
+    = use this pixel for feature extraction, black = ignore.
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    binary = (mask_float >= threshold).astype(np.uint8) * 255
+    cv2.imwrite(str(out_path), binary)

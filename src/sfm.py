@@ -52,16 +52,35 @@ def run_colmap(
     quality: str = "medium",
     single_camera: bool = True,
     use_gpu: bool = True,
+    mask_dir: str | Path | None = None,
+    matcher: str = "sequential",
 ) -> Path:
-    """Run COLMAP's `automatic_reconstructor` on a directory of frames.
+    """Run COLMAP's three-step SfM pipeline on a directory of frames.
+
+    Internally calls `feature_extractor` → matcher → `mapper`, rather than
+    `automatic_reconstructor`, so we can pass `--ImageReader.mask_path` to
+    restrict feature extraction to a subset of each frame (e.g. the
+    bark-mask region for tree captures). This is the supported COLMAP way
+    to keep the extractor away from sky/canopy/background pixels.
 
     Args:
         image_dir: directory containing extracted frames for one tree.
         workspace_dir: directory COLMAP will write the database and `sparse/`
             model into. Created if missing.
-        quality: COLMAP quality preset {low, medium, high, extreme}.
+        quality: rough preset mapped to `SiftExtraction.max_num_features`
+            (low → 4096, medium → 8192, high → 16384, extreme → 32768).
         single_camera: assume all frames share intrinsics (true for one phone clip).
-        use_gpu: pass --use_gpu 1 to COLMAP (requires a CUDA build for true speed).
+        use_gpu: pass `--SiftExtraction.use_gpu 1` and `--SiftMatching.use_gpu 1`.
+            On macOS Homebrew COLMAP this uses the OpenGL SiftGPU path, which
+            is more stable than the CPU matcher in our experience.
+        mask_dir: optional directory of binary PNG masks. For each frame
+            `image_dir/<name>.<ext>`, COLMAP looks for `mask_dir/<name>.png`
+            (extension always `.png`, basename matches the image). White
+            pixels (255) → use for SIFT extraction, black (0) → ignore.
+        matcher: "sequential" matches each frame against a small window of
+            its neighbours (right choice for a video orbit — much faster
+            than exhaustive, and avoids the macOS Homebrew exhaustive_matcher
+            crash mode). "exhaustive" matches every pair.
 
     Returns:
         Path to the produced sparse model directory (`<workspace>/sparse/0/`).
@@ -75,24 +94,68 @@ def run_colmap(
     if not any(image_dir.iterdir()):
         raise RuntimeError(f"No images found in {image_dir}.")
 
-    cmd = [
-        "colmap", "automatic_reconstructor",
-        "--workspace_path", str(workspace_dir),
-        "--image_path", str(image_dir),
-        "--quality", quality,
-        "--single_camera", "1" if single_camera else "0",
-        "--use_gpu", "1" if use_gpu else "0",
-        "--sparse", "1",
-        "--dense", "0",
-    ]
-    subprocess.run(cmd, check=True)
-
+    database = workspace_dir / "database.db"
     sparse_root = workspace_dir / "sparse"
-    if not sparse_root.exists():
-        raise RuntimeError("COLMAP finished but no sparse/ directory was produced.")
+    sparse_root.mkdir(exist_ok=True)
+
+    gpu_flag = "1" if use_gpu else "0"
+    max_features = {
+        "low":     4096,
+        "medium":  8192,
+        "high":    16384,
+        "extreme": 32768,
+    }.get(quality, 8192)
+
+    # 1. Feature extraction.
+    extract_cmd = [
+        "colmap", "feature_extractor",
+        "--database_path", str(database),
+        "--image_path",    str(image_dir),
+        "--ImageReader.single_camera", "1" if single_camera else "0",
+        "--ImageReader.camera_model",  "SIMPLE_RADIAL",
+        "--SiftExtraction.use_gpu",          gpu_flag,
+        "--SiftExtraction.max_num_features", str(max_features),
+    ]
+    if mask_dir is not None:
+        mask_dir = Path(mask_dir)
+        if not mask_dir.exists():
+            raise FileNotFoundError(f"mask_dir does not exist: {mask_dir}")
+        extract_cmd.extend(["--ImageReader.mask_path", str(mask_dir)])
+    subprocess.run(extract_cmd, check=True)
+
+    # 2. Feature matching.
+    if matcher == "sequential":
+        match_cmd = [
+            "colmap", "sequential_matcher",
+            "--database_path", str(database),
+            "--SiftMatching.use_gpu", gpu_flag,
+        ]
+    elif matcher == "exhaustive":
+        match_cmd = [
+            "colmap", "exhaustive_matcher",
+            "--database_path", str(database),
+            "--SiftMatching.use_gpu", gpu_flag,
+        ]
+    else:
+        raise ValueError(f"matcher must be 'sequential' or 'exhaustive', got {matcher!r}")
+    subprocess.run(match_cmd, check=True)
+
+    # 3. Incremental mapping (sparse reconstruction).
+    mapper_cmd = [
+        "colmap", "mapper",
+        "--database_path", str(database),
+        "--image_path",    str(image_dir),
+        "--output_path",   str(sparse_root),
+    ]
+    subprocess.run(mapper_cmd, check=True)
+
     submodels = sorted([p for p in sparse_root.iterdir() if p.is_dir()])
     if not submodels:
-        raise RuntimeError("COLMAP sparse/ exists but contains no model.")
+        raise RuntimeError(
+            "COLMAP mapper produced no sub-models — check that feature "
+            "extraction and matching succeeded, and that the masks (if any) "
+            "didn't reject every frame."
+        )
     return submodels[0]
 
 
