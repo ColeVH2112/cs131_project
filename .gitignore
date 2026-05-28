@@ -36,3 +36,8 @@ sparse/
 dense/
 database.db
 .claude/
+
+# Notebook-local working dirs created when a notebook runs from inside the
+# notebooks/ directory without setting PROJECT_ROOT first.
+notebooks/data/
+notebooks/outputs/
