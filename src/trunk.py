@@ -185,6 +185,13 @@ def ransac_trunk_axis(
     # Refit the line with PCA over the inlier set for a tighter estimate.
     anchor, direction = fit_line_pca(points[best_inlier_mask])
 
+    # PCA's sign is ambiguous — it can return either +direction or -direction.
+    # We canonicalise so direction points "upward" (i.e. has positive dot
+    # product with the world up axis). Without this, "root = inlier with
+    # smallest signed projection" picks the trunk TOP instead of the base.
+    if float(direction @ up_axis) < 0.0:
+        direction = -direction
+
     # Re-pick the inlier set under the refined line, since PCA may have
     # moved the axis enough that a couple of marginal points cross the
     # threshold either way.
