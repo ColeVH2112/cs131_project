@@ -98,13 +98,19 @@ def run_colmap(
     sparse_root = workspace_dir / "sparse"
     sparse_root.mkdir(exist_ok=True)
 
-    gpu_flag = "1" if use_gpu else "0"
     max_features = {
         "low":     4096,
         "medium":  8192,
         "high":    16384,
         "extreme": 32768,
     }.get(quality, 8192)
+
+    # Note on GPU flags: the macOS Homebrew COLMAP 4.0.4 build is compiled
+    # without GPU SIFT support, so --SiftExtraction.use_gpu and
+    # --SiftMatching.use_gpu raise "unrecognised option" errors. We omit
+    # them entirely; CPU SIFT is the only available path on that build.
+    # `use_gpu` is kept as a parameter for API compatibility but ignored.
+    del use_gpu
 
     # 1. Feature extraction.
     extract_cmd = [
@@ -113,7 +119,6 @@ def run_colmap(
         "--image_path",    str(image_dir),
         "--ImageReader.single_camera", "1" if single_camera else "0",
         "--ImageReader.camera_model",  "SIMPLE_RADIAL",
-        "--SiftExtraction.use_gpu",          gpu_flag,
         "--SiftExtraction.max_num_features", str(max_features),
     ]
     if mask_dir is not None:
@@ -128,13 +133,11 @@ def run_colmap(
         match_cmd = [
             "colmap", "sequential_matcher",
             "--database_path", str(database),
-            "--SiftMatching.use_gpu", gpu_flag,
         ]
     elif matcher == "exhaustive":
         match_cmd = [
             "colmap", "exhaustive_matcher",
             "--database_path", str(database),
-            "--SiftMatching.use_gpu", gpu_flag,
         ]
     else:
         raise ValueError(f"matcher must be 'sequential' or 'exhaustive', got {matcher!r}")

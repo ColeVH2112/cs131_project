@@ -221,42 +221,60 @@ def bark_color_mask_lab(
     sample_grid: tuple = (
         (0.3, 0.85), (0.5, 0.85), (0.7, 0.85),
         (0.3, 0.60), (0.5, 0.60), (0.7, 0.60),
-        (0.4, 0.35), (0.6, 0.35),
+        (0.4, 0.35), (0.5, 0.35), (0.6, 0.35),
+        (0.5, 0.15),
     ),
-    sample_half: int = 20,
-    mahalanobis_max: float = 3.0,
-    spatial_sigma_frac: float = 0.25,
-    feather_px: int = 21,
-    bark_a_min: int = 130,
-    bark_b_min: int = 130,
-    morph_kernel: int = 7,
-    dilate_kernel: int = 9,
+    sample_half: int = 25,
+    mahalanobis_max: float = 5.0,
+    spatial_sigma_frac: float = 0.35,
+    feather_px: int = 15,
+    bark_a_min: int = 135,
+    bark_b_min: int = 135,
+    min_valid_samples: int = 2,
+    morph_kernel: int = 5,
+    dilate_kernel: int = 13,
+    cov_regularization: float = 25.0,
+    use_texture: bool = True,
+    texture_window: int = 15,
+    texture_strength_cap: float = 40.0,
+    texture_weight: float = 0.7,
 ) -> np.ndarray:
     """Per-frame bark mask in LAB chrominance with a vertical spatial prior.
 
     Args:
         image_bgr: (H, W, 3) BGR frame.
-        sample_grid: list of (x_frac, y_frac) sample-patch centres, in [0, 1].
-            8 default positions cover plausible trunk locations across the
-            orbit. Each patch is sample_half pixels around its centre.
-        sample_half: half-side of each sample patch (default: 20 → 40x40 patches).
-        mahalanobis_max: max Mahalanobis distance (in sigmas) for a pixel's
-            (a*, b*) to count as bark. 3.0 → keep ~99.7% of the bark
-            distribution if it's roughly Gaussian.
-        spatial_sigma_frac: width of the central vertical Gaussian band as a
-            fraction of image width. Pixels at |x - w/2| > 2 * sigma get
-            heavily suppressed. 0.25 → sigma = w/4 (typical trunk extent).
-        feather_px: Gaussian-blur kernel for the final mask edge. Set to 0
-            to skip feathering (e.g. when saving as a hard binary for
-            COLMAP's --ImageReader.mask_path).
-        bark_a_min, bark_b_min: only grid samples whose median (a*, b*) is
-            beyond these thresholds (128 = neutral in cv2 LAB; >128 = red
-            for a, >128 = yellow for b) are used as bark exemplars. Grid
-            points that landed on sky/grass/concrete are discarded.
-        morph_kernel: kernel size for the open/close passes that remove
-            speckle.
+        sample_grid: (x_frac, y_frac) sample-patch centres, in [0, 1]. The
+            default 10 positions cover plausible trunk locations along the
+            full vertical extent of the frame, biased to the centre column.
+        sample_half: half-side of each sample patch in pixels (50x50 default).
+        mahalanobis_max: max Mahalanobis distance (in sigmas, computed in
+            LAB-ab space) for a pixel to count as bark. 5.0 keeps a wide
+            ellipse around the sampled bark distribution — bark varies a
+            lot between sunlit, shadowed, and branch-junction regions, so a
+            tight 3-sigma window discards most of the trunk. Raise to 7-8
+            if the mask is still too narrow, lower to 4 if it bleeds.
+        spatial_sigma_frac: width of the vertical Gaussian band centred at
+            x = w/2, as a fraction of image width. 0.35 (sigma = ~0.35*w)
+            keeps ~95% of the central two-thirds horizontally and only
+            cuts the extreme periphery (background trees / buildings).
+        feather_px: Gaussian-blur kernel for the final mask edge. Reduced
+            to 15px so the binary threshold passes through more of the
+            actual mask interior.
+        bark_a_min, bark_b_min: median (a*, b*) gate on whether a grid
+            sample counts as bark (128 = neutral, > 128 = red for a*,
+            > 128 = yellow for b*). 125 is permissive enough to catch
+            shadowed bark where chrominance approaches neutral.
+        morph_kernel: kernel size for the open/close speckle filter.
         dilate_kernel: kernel size for the final dilation that bridges
-            small gaps in the mask.
+            gaps and expands the mask outwards over thin bark areas
+            (default 13: larger than the 9 used previously, which left
+            holes around branching transitions).
+        cov_regularization: ridge added to the LAB-ab covariance matrix
+            before inversion. 25.0 corresponds to ~5-pixel a*/b* slack,
+            which is enough to make the Mahalanobis ellipse cover the
+            full bark distribution even when sampled patches happen to
+            be tightly clustered (e.g. all sunlit, no shadow). Raise to
+            soften the mask further, lower to tighten.
 
     Returns:
         (H, W) float mask in [0, 1]. ~1.0 = bark, ~0.0 = not bark or far
@@ -282,15 +300,26 @@ def bark_color_mask_lab(
             continue
         bark_pixels.append(patch.reshape(-1, 2).astype(np.float32))
 
-    if not bark_pixels:
-        # Fallback: broad red-yellow gate.
-        a_chan = ab[:, :, 0]
-        b_chan = ab[:, :, 1]
-        binary = ((a_chan > bark_a_min) & (b_chan > bark_b_min)).astype(np.uint8) * 255
+    if len(bark_pixels) < min_valid_samples:
+        # Too few grid points landed on confidently-bark-colored pixels.
+        # Common causes: sun-glare, lens flare, overexposure, or the
+        # trunk drifted out of the sample grid. Returning an empty or
+        # tightly-fitted mask here is dangerous — if only 1 sample
+        # passed and it happened to land on a non-bark pixel, the
+        # Mahalanobis distribution centres on the wrong colour and the
+        # mask inverts (bark gets rejected, sky/glare passes). Safer
+        # fallback: return an all-pass mask so COLMAP just runs SIFT on
+        # the full frame for this image.
+        mask_float = np.ones((h, w), dtype=np.float32)
+        return mask_float
     else:
         samples = np.vstack(bark_pixels)
         mean = samples.mean(axis=0)
-        cov = np.cov(samples.T) + np.eye(2) * 1.0    # regularize against degenerate samples
+        # Wider covariance: each sample patch is fairly homogeneous, so the
+        # raw covariance underestimates bark variance across the whole trunk.
+        # Adding a ridge of cov_regularization expands the Mahalanobis
+        # ellipse to cover bark colours we didn't happen to sample.
+        cov = np.cov(samples.T) + np.eye(2) * cov_regularization
         cov_inv = np.linalg.inv(cov)
         diff = ab - mean[None, None, :]                          # (H, W, 2)
         m2 = np.einsum("hwi,ij,hwj->hw", diff, cov_inv, diff)    # Mahalanobis^2
@@ -307,7 +336,34 @@ def bark_color_mask_lab(
 
     mask_float = binary.astype(np.float32) / 255.0
 
-    # Vertical spatial prior — Gaussian band centred on x = w/2.
+    # Texture-rescue path: bark has a distinctive vertical-grooved texture
+    # that survives lighting variation (sunlit and shadowed bark differ in
+    # *colour* but both have the same gradient density at fine scales).
+    # The colour-based mask above is brittle to lighting; texture is not.
+    # We compute a local gradient-density map and OR it into the mask so
+    # that bark pixels rejected by the colour test get rescued if they
+    # have bark-like texture. Sky and sun-glare regions have near-zero
+    # gradient density and are unaffected.
+    if use_texture:
+        gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+        gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+        grad_mag = cv2.magnitude(gx, gy)
+        # Local gradient density: average magnitude in a `texture_window`-sized
+        # box around each pixel. Bark patches have many small gradients;
+        # sky has almost none.
+        local_texture = cv2.boxFilter(grad_mag, cv2.CV_32F,
+                                        (texture_window, texture_window))
+        # Normalise into [0, 1] with a soft cap. Anything above
+        # texture_strength_cap is treated as full texture.
+        texture_score = np.clip(local_texture / texture_strength_cap, 0.0, 1.0)
+        # OR-combine: pixels passing colour stay at 1.0; pixels rejected
+        # by colour get rescued up to texture_weight if their texture is high.
+        mask_float = np.maximum(mask_float, texture_score * texture_weight)
+
+    # Vertical spatial prior — Gaussian band centred on x = w/2. Applied
+    # AFTER texture rescue so background-tree bark/foliage at the frame
+    # periphery still gets suppressed even though it has bark-like texture.
     if spatial_sigma_frac > 0:
         sigma_x = max(1.0, w * spatial_sigma_frac)
         xs = np.arange(w, dtype=np.float32)
