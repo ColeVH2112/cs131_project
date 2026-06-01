@@ -23,7 +23,11 @@ import numpy as np
 from matplotlib.figure import Figure
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  — registers the 3d projection
 
-FIGDIR = Path("outputs/figures")
+# Anchor at the project root (parent of src/) so figures land in the same
+# outputs/figures/ regardless of whether the caller's cwd is the repo root
+# (CLI runner) or notebooks/ (Jupyter). Previously this was a cwd-relative path,
+# which silently wrote notebook figures to notebooks/outputs/figures/.
+FIGDIR = Path(__file__).resolve().parent.parent / "outputs" / "figures"
 
 
 def _ensure_figdir() -> None:
@@ -152,12 +156,44 @@ def plot_mask_overlay(
     return ax
 
 
+def rotation_aligning(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Rotation matrix R such that R @ a is parallel to b (Rodrigues' formula).
+
+    Used to bring the recovered trunk axis onto plot-vertical. Pure SfM has no
+    gravity reference, so COLMAP's world frame is arbitrary (here ~aligned with
+    the tilted capture camera) and a vertical trunk is stored tilted. This is a
+    rigid rotation: it changes the *view*, never relative angles or distances.
+    """
+    a = np.asarray(a, float); b = np.asarray(b, float)
+    a = a / (np.linalg.norm(a) + 1e-12)
+    b = b / (np.linalg.norm(b) + 1e-12)
+    v = np.cross(a, b)
+    s = np.linalg.norm(v)
+    c = float(np.dot(a, b))
+    if s < 1e-8:                       # already (anti)parallel
+        return np.eye(3) if c > 0 else -np.eye(3)
+    vx = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+    return np.eye(3) + vx + vx @ vx * ((1 - c) / (s * s))
+
+
 def plot_branch_graph(
     nodes: np.ndarray, edges: list[tuple[int, int]],
     trunk_axis: tuple[np.ndarray, np.ndarray] | None = None,
     title: str = "Branch graph",
+    align_trunk_vertical: bool = True,
 ) -> Figure:
-    """3D scatter of skeleton nodes with edges drawn as line segments."""
+    """3D scatter of skeleton nodes with edges drawn as line segments.
+
+    If `align_trunk_vertical` and a trunk axis is given, the cloud is rigidly
+    rotated about the trunk root so the trunk points up the +Z (plot-vertical)
+    axis — undoing COLMAP's arbitrary world orientation for display only.
+    """
+    if trunk_axis is not None and align_trunk_vertical:
+        p0, d = trunk_axis
+        R = rotation_aligning(d, np.array([0.0, 0.0, 1.0]))
+        nodes = (R @ (nodes - p0).T).T + p0
+        trunk_axis = (p0, R @ np.asarray(d, float))
+
     fig = plt.figure(figsize=(9, 9))
     ax = fig.add_subplot(111, projection="3d")
     ax.scatter(nodes[:, 0], nodes[:, 1], nodes[:, 2], c="tab:brown", s=3)

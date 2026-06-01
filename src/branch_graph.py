@@ -78,23 +78,32 @@ def build_knn_graph(
 
     k_eff = min(k, N - 1)
 
-    # Pairwise Euclidean distances. O(N^2) is fine for sparse SfM clouds
-    # (typically a few thousand points after filtering). Hand-rolled here
-    # rather than scipy.cKDTree to stay inside the from-scratch boundary.
-    diff = points[:, None, :] - points[None, :, :]    # (N, N, 3)
-    dists = np.linalg.norm(diff, axis=2)               # (N, N)
-    np.fill_diagonal(dists, np.inf)                    # exclude self-edges
-
     graph: dict[int, list[tuple[int, float]]] = {i: [] for i in range(N)}
 
-    # Forward k-NN edges.
-    for i in range(N):
-        nearest = np.argpartition(dists[i], k_eff)[:k_eff]
-        for j in nearest:
-            d = float(dists[i, int(j)])
-            if max_edge_length is not None and d > max_edge_length:
-                continue
-            graph[i].append((int(j), d))
+    # Memory-bounded k-NN. Materialising the full (N, N, 3) difference tensor is
+    # O(N^2) memory (~44 GB at N=43k) and OOM-kills the kernel on the 20k-40k-point
+    # filtered clouds. Instead we compute squared distances one ROW BLOCK at a time
+    # via |a-b|^2 = |a|^2 + |b|^2 - 2 a·b, so peak memory is O(BLOCK * N), not
+    # O(N^2). Still hand-rolled (no scipy.cKDTree) to stay inside the from-scratch
+    # boundary; argpartition on squared distance picks the same neighbours as on
+    # distance, so the resulting graph is identical to the naive version.
+    sq = np.einsum("ij,ij->i", points, points)         # |x|^2 per point, (N,)
+    BLOCK = 512
+    for start in range(0, N, BLOCK):
+        end = min(start + BLOCK, N)
+        block = points[start:end]                      # (B, 3)
+        d2 = sq[start:end, None] + sq[None, :] - 2.0 * (block @ points.T)  # (B, N)
+        np.maximum(d2, 0.0, out=d2)                     # floor tiny negatives
+        for bi in range(end - start):
+            i = start + bi
+            row = d2[bi]
+            row[i] = np.inf                             # exclude self-edge
+            nearest = np.argpartition(row, k_eff)[:k_eff]
+            for j in nearest:
+                d = float(np.sqrt(row[int(j)]))
+                if max_edge_length is not None and d > max_edge_length:
+                    continue
+                graph[i].append((int(j), d))
 
     # Symmetrise: if i picked j, ensure j has i. Avoid duplicate edges.
     existing = {(i, j) for i in graph for j, _ in graph[i]}

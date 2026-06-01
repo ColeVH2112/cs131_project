@@ -1,0 +1,28 @@
+# Ground-truth primary-branch measurements for tree_5.
+# Collected by hand (tape measure + protractor/inclinometer) at the trunk base.
+#
+# MEASUREMENT CONVENTIONS — read before measuring, these MUST match the code:
+#
+#   branch_id        integer, one row per FIRST-ORDER (primary) branch only.
+#                    Skip twigs / secondary branches (out of scope per proposal).
+#
+#   attach_height_m  height of the attachment point ABOVE THE TRUNK BASE, in
+#                    metres, measured ALONG the trunk (vertical distance from the
+#                    ground-level trunk base up to where the branch leaves the trunk).
+#                    The trunk base itself is height 0.
+#
+#   attach_angle_deg angle of the branch measured OFF THE TRUNK AXIS, in degrees.
+#                    0   = branch runs parallel to the trunk (straight up).
+#                    90  = branch sticks straight out, perpendicular to the trunk.
+#                    This is the SAME convention as evaluate.predicted_branches_from_graph
+#                    (angle between the branch's initial direction and the trunk axis).
+#                    Do NOT measure from horizontal — that would be 90 minus this.
+#
+# NOTE: trunk height is the calibration anchor passed via
+#   `--measured-trunk-height` to scripts/run_pipeline.py, so it is NOT an
+#   accuracy result. The accuracy metrics come from the per-branch rows below.
+#
+# Replace the example rows below with your real field measurements.
+branch_id,attach_height_m,attach_angle_deg
+0,0 ,85
+1,0.8,50

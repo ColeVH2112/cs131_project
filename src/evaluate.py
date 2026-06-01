@@ -46,21 +46,34 @@ class PredBranch:
 
 @dataclass
 class TreeMetrics:
-    """Per-tree evaluation result."""
+    """Per-tree evaluation result.
+
+    `recall` = matched / n_gt  (did we find the real branches?).
+    `precision` = matched / n_pred  (how many predicted branches were real?).
+    Reporting both is important here: Dijkstra over a noisy cloud tends to
+    over-produce "primary branches", so a high recall can hide heavy
+    over-segmentation. n_pred vs n_gt makes that visible.
+    """
     tree_id: str
     n_gt: int
     n_pred: int
     n_matched: int
     recall: float
+    precision: float
     angle_mae_deg: float
     height_mae_m: float
 
 
 def load_ground_truth(csv_path: str | Path) -> list[GTBranch]:
-    """Load tape-measure ground-truth for one tree."""
+    """Load tape-measure ground-truth for one tree.
+
+    Blank lines and `#`-comment lines are ignored, so the CSV can carry a
+    measurement-convention header (see data/ground_truth/tree_5.csv).
+    """
     out: list[GTBranch] = []
     with open(csv_path) as f:
-        reader = csv.DictReader(f)
+        rows = (ln for ln in f if ln.strip() and not ln.lstrip().startswith("#"))
+        reader = csv.DictReader(rows)
         for row in reader:
             out.append(GTBranch(
                 branch_id=int(row["branch_id"]),
@@ -76,6 +89,7 @@ def predicted_branches_from_graph(
     trunk_root: np.ndarray,
     trunk_axis: np.ndarray,
     parent_of: dict[int, int],
+    on_trunk_thresh: float = 0.05,
 ) -> list[PredBranch]:
     """Walk the branch graph and emit one PredBranch per primary branch.
 
@@ -84,12 +98,21 @@ def predicted_branches_from_graph(
     along the trunk axis from the root. Attachment angle = angle between the
     branch's initial segment direction and the trunk axis.
 
+    NOTE ON UNITS: this runs on `nodes` in whatever units the cloud is in. In the
+    production pipeline (scripts/run_pipeline.py) the metric scale is applied
+    *after* this call, so here `nodes`, `trunk_root`, and `on_trunk_thresh` are
+    all in arbitrary COLMAP units — NOT metres. `on_trunk_thresh` therefore has
+    to be tuned per-reconstruction (this is one reason a per-tree set of graph
+    thresholds tuned on tree_5 does not transfer unchanged to other trees).
+
     Args:
-        nodes: (N, 3) skeleton node positions in world coords.
+        nodes: (N, 3) skeleton node positions (COLMAP units unless pre-scaled).
         edges: list of (parent_idx, child_idx) skeleton edges.
-        trunk_root: (3,) world coords of the trunk base.
+        trunk_root: (3,) coords of the trunk base, same units as `nodes`.
         trunk_axis: (3,) unit vector along the trunk (pointing up the tree).
         parent_of: child → parent map produced by Dijkstra in branch_graph.
+        on_trunk_thresh: max perpendicular distance (in `nodes` units) for a
+            node to count as lying on the trunk axis.
 
     Returns:
         List of PredBranch entries, one per detected primary branch.
@@ -98,9 +121,8 @@ def predicted_branches_from_graph(
     out: list[PredBranch] = []
     bid = 0
     # An edge is a "primary" branch if it transitions off-trunk. We mark a
-    # node as on-trunk if it's within a small distance of the trunk line.
+    # node as on-trunk if it's within `on_trunk_thresh` of the trunk line.
     # (branch_graph already prunes spurs / merges segments, so this is cheap.)
-    on_trunk_thresh = 0.05  # 5 cm — adjust per-tree if needed
     on_trunk = _within_distance_of_line(nodes, trunk_root, axis, on_trunk_thresh)
 
     for parent_idx, child_idx in edges:
@@ -163,7 +185,8 @@ def evaluate_tree(
     if not pairs:
         return TreeMetrics(
             tree_id=tree_id, n_gt=len(gts), n_pred=len(preds),
-            n_matched=0, recall=0.0, angle_mae_deg=float("nan"), height_mae_m=float("nan"),
+            n_matched=0, recall=0.0, precision=0.0,
+            angle_mae_deg=float("nan"), height_mae_m=float("nan"),
         )
     angle_errs = [abs(preds[pi].attach_angle_deg - gts[gi].attach_angle_deg) for gi, pi in pairs]
     height_errs = [abs(preds[pi].attach_height_m - gts[gi].attach_height_m) for gi, pi in pairs]
@@ -171,6 +194,7 @@ def evaluate_tree(
         tree_id=tree_id,
         n_gt=len(gts), n_pred=len(preds), n_matched=len(pairs),
         recall=len(pairs) / max(1, len(gts)),
+        precision=len(pairs) / max(1, len(preds)),
         angle_mae_deg=float(np.mean(angle_errs)),
         height_mae_m=float(np.mean(height_errs)),
     )
